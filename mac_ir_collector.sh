@@ -1,0 +1,861 @@
+#!/bin/bash
+
+# =============================================================================
+# macOS Incident Response Log Collector
+# =============================================================================
+# Collects forensically valuable logs and artifacts from macOS for 
+# investigation and incident response purposes.
+#
+# Author: orchardroot
+# Version: 1.0.0
+# =============================================================================
+
+set -uo pipefail
+
+# --- Configuration ---
+SCRIPT_VERSION="1.0.0"
+HOSTNAME=$(hostname -s)
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+OUTPUT_DIR="${1:-$HOME/Desktop/IR_Collection_${HOSTNAME}_${TIMESTAMP}}"
+LOG_FILE="$OUTPUT_DIR/collection.log"
+MANIFEST_FILE="$OUTPUT_DIR/manifest.txt"
+HASH_FILE="$OUTPUT_DIR/hashes.sha256"
+
+DRY_RUN=false
+VERBOSE=false
+COLLECT_UNIFIED_LOGS=true
+UNIFIED_LOG_HOURS=24
+
+# Colours for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Colour
+
+# --- Functions ---
+
+usage() {
+    cat << EOF
+macOS Incident Response Log Collector v${SCRIPT_VERSION}
+
+Usage: $0 [OUTPUT_DIR] [OPTIONS]
+
+Collects forensically valuable logs and artifacts from macOS for 
+investigation and incident response purposes.
+
+ARGUMENTS:
+  OUTPUT_DIR          Directory to store collected artifacts
+                      (default: ~/Desktop/IR_Collection_<hostname>_<timestamp>)
+
+OPTIONS:
+  -n, --dry-run       Show what would be collected without copying
+  -v, --verbose       Show detailed output
+  -u, --unified-hours Number of hours of unified logs to collect (default: 24)
+  --no-unified        Skip unified log collection (faster)
+  -h, --help          Display this help message
+
+EXAMPLES:
+  $0                              Collect to default location
+  $0 /tmp/ir_collection           Collect to specific directory
+  $0 -n                           Dry run - show what would be collected
+  $0 -u 72                        Collect 72 hours of unified logs
+  $0 --no-unified                 Skip unified logs (much faster)
+
+NOTES:
+  - Some artifacts require sudo privileges
+  - Run with sudo for complete collection
+  - Unified log export can take several minutes
+
+OUTPUT STRUCTURE:
+  IR_Collection_<hostname>_<timestamp>/
+  ├── collection.log          # Collection activity log
+  ├── manifest.txt            # List of all collected files
+  ├── hashes.sha256           # SHA256 hashes for integrity
+  ├── system_info.txt         # Basic system information
+  ├── system_logs/            # /var/log contents
+  ├── unified_logs/           # Exported unified logs
+  ├── audit_logs/             # BSM audit logs
+  ├── user_logs/              # ~/Library/Logs
+  ├── diagnostic_reports/     # Crash reports
+  ├── persistence/            # LaunchAgents, LaunchDaemons, etc.
+  ├── network/                # Network configuration and logs
+  ├── browser_artifacts/      # Browser history databases
+  ├── user_activity/          # KnowledgeC, recent items, etc.
+  ├── security_databases/     # TCC, quarantine events
+  └── shell_history/          # Bash/zsh history files
+
+EOF
+}
+
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    case "$level" in
+        INFO)  colour="$GREEN" ;;
+        WARN)  colour="$YELLOW" ;;
+        ERROR) colour="$RED" ;;
+        DEBUG) colour="$BLUE" ;;
+        *)     colour="$NC" ;;
+    esac
+    
+    echo -e "${colour}[${level}]${NC} ${message}"
+    
+    if [ -f "$LOG_FILE" ]; then
+        echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+    fi
+}
+
+log_verbose() {
+    if [ "$VERBOSE" = true ]; then
+        log "DEBUG" "$1"
+    fi
+}
+
+check_sudo() {
+    if [ "$EUID" -ne 0 ]; then
+        log "WARN" "Not running as root. Some artifacts may not be collected."
+        log "WARN" "Re-run with sudo for complete collection."
+        return 1
+    fi
+    return 0
+}
+
+init_collection() {
+    if [ "$DRY_RUN" = true ]; then
+        log "INFO" "DRY RUN MODE - No files will be copied"
+        return 0
+    fi
+    
+    mkdir -p "$OUTPUT_DIR"
+    
+    # Initialise log file
+    echo "# macOS IR Collection Log" > "$LOG_FILE"
+    echo "# Started: $(date)" >> "$LOG_FILE"
+    echo "# Hostname: $HOSTNAME" >> "$LOG_FILE"
+    echo "# User: $(whoami)" >> "$LOG_FILE"
+    echo "" >> "$LOG_FILE"
+    
+    # Initialise manifest
+    echo "# macOS IR Collection Manifest" > "$MANIFEST_FILE"
+    echo "# Generated: $(date)" >> "$MANIFEST_FILE"
+    echo "" >> "$MANIFEST_FILE"
+    
+    # Initialise hash file
+    echo "# SHA256 Hashes for IR Collection" > "$HASH_FILE"
+    echo "# Generated: $(date)" >> "$HASH_FILE"
+    echo "" >> "$HASH_FILE"
+    
+    log "INFO" "Collection directory: $OUTPUT_DIR"
+}
+
+collect_file() {
+    local src="$1"
+    local dest_dir="$2"
+    local description="${3:-}"
+    
+    if [ ! -e "$src" ]; then
+        log_verbose "Not found: $src"
+        return 1
+    fi
+    
+    if [ "$DRY_RUN" = true ]; then
+        log "INFO" "Would collect: $src"
+        return 0
+    fi
+    
+    mkdir -p "$OUTPUT_DIR/$dest_dir"
+    
+    if [ -f "$src" ]; then
+        cp -p "$src" "$OUTPUT_DIR/$dest_dir/" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            local filename
+            filename=$(basename "$src")
+            echo "$dest_dir/$filename - $src" >> "$MANIFEST_FILE"
+            log_verbose "Collected: $src"
+            return 0
+        else
+            log "WARN" "Failed to copy: $src (permission denied?)"
+            return 1
+        fi
+    elif [ -d "$src" ]; then
+        cp -Rp "$src" "$OUTPUT_DIR/$dest_dir/" 2>/dev/null
+        if [ $? -eq 0 ]; then
+            local dirname
+            dirname=$(basename "$src")
+            echo "$dest_dir/$dirname/ - $src" >> "$MANIFEST_FILE"
+            log_verbose "Collected directory: $src"
+            return 0
+        else
+            log "WARN" "Failed to copy directory: $src"
+            return 1
+        fi
+    fi
+}
+
+collect_with_find() {
+    local search_path="$1"
+    local pattern="$2"
+    local dest_dir="$3"
+    local max_depth="${4:-}"
+    
+    if [ ! -d "$search_path" ]; then
+        log_verbose "Search path not found: $search_path"
+        return 1
+    fi
+    
+    local find_cmd="find \"$search_path\""
+    [ -n "$max_depth" ] && find_cmd="$find_cmd -maxdepth $max_depth"
+    find_cmd="$find_cmd -name \"$pattern\" -type f 2>/dev/null"
+    
+    local count=0
+    while IFS= read -r file; do
+        if [ -n "$file" ]; then
+            collect_file "$file" "$dest_dir"
+            ((count++))
+        fi
+    done < <(eval "$find_cmd")
+    
+    log_verbose "Found $count files matching '$pattern' in $search_path"
+}
+
+# --- Collection Functions ---
+
+collect_system_info() {
+    log "INFO" "Collecting system information..."
+    
+    if [ "$DRY_RUN" = true ]; then
+        log "INFO" "Would collect: System information"
+        return 0
+    fi
+    
+    local info_file="$OUTPUT_DIR/system_info.txt"
+    
+    {
+        echo "# macOS System Information"
+        echo "# Collected: $(date)"
+        echo ""
+        echo "=== HOSTNAME ==="
+        hostname
+        echo ""
+        echo "=== OS VERSION ==="
+        sw_vers
+        echo ""
+        echo "=== HARDWARE ==="
+        system_profiler SPHardwareDataType 2>/dev/null
+        echo ""
+        echo "=== CURRENT USER ==="
+        whoami
+        id
+        echo ""
+        echo "=== LOGGED IN USERS ==="
+        who
+        echo ""
+        echo "=== LAST LOGINS ==="
+        last -20
+        echo ""
+        echo "=== UPTIME ==="
+        uptime
+        echo ""
+        echo "=== RUNNING PROCESSES ==="
+        ps aux
+        echo ""
+        echo "=== NETWORK CONNECTIONS ==="
+        netstat -an 2>/dev/null || echo "netstat not available"
+        echo ""
+        echo "=== LISTENING PORTS ==="
+        lsof -i -P -n 2>/dev/null | head -100
+        echo ""
+        echo "=== MOUNTED VOLUMES ==="
+        mount
+        echo ""
+        echo "=== DISK USAGE ==="
+        df -h
+        echo ""
+        echo "=== ENVIRONMENT VARIABLES ==="
+        env
+        echo ""
+    } > "$info_file"
+    
+    log "INFO" "System information collected"
+}
+
+collect_system_logs() {
+    log "INFO" "Collecting system logs from /var/log..."
+    
+    # Key system logs
+    collect_file "/var/log/system.log" "system_logs" "Main system log"
+    collect_file "/var/log/install.log" "system_logs" "Installation log"
+    collect_file "/var/log/wifi.log" "system_logs" "WiFi log"
+    collect_file "/var/log/appfirewall.log" "system_logs" "Application firewall log"
+    collect_file "/var/log/fsck_apfs.log" "system_logs" "APFS filesystem check log"
+    collect_file "/var/log/fsck_hfs.log" "system_logs" "HFS filesystem check log"
+    
+    # ASL logs (legacy but still useful)
+    if [ -d "/var/log/asl" ]; then
+        collect_file "/var/log/asl" "system_logs/asl" "Apple System Logs"
+    fi
+    
+    # DiagnosticMessages
+    if [ -d "/var/log/DiagnosticMessages" ]; then
+        collect_file "/var/log/DiagnosticMessages" "system_logs/diagnostic_messages" "Diagnostic messages"
+    fi
+    
+    # Collect any .log files in /var/log
+    collect_with_find "/var/log" "*.log" "system_logs" 1
+    
+    log "INFO" "System logs collected"
+}
+
+collect_unified_logs() {
+    if [ "$COLLECT_UNIFIED_LOGS" = false ]; then
+        log "INFO" "Skipping unified log collection (--no-unified)"
+        return 0
+    fi
+    
+    log "INFO" "Collecting unified logs (last ${UNIFIED_LOG_HOURS} hours)..."
+    log "INFO" "This may take several minutes..."
+    
+    if [ "$DRY_RUN" = true ]; then
+        log "INFO" "Would collect: Unified logs for last ${UNIFIED_LOG_HOURS} hours"
+        return 0
+    fi
+    
+    mkdir -p "$OUTPUT_DIR/unified_logs"
+    
+    local start_time
+    start_time=$(date -v-${UNIFIED_LOG_HOURS}H '+%Y-%m-%d %H:%M:%S')
+    
+    # Export unified logs to text format
+    log show --start "$start_time" --style syslog > "$OUTPUT_DIR/unified_logs/unified_log_syslog.txt" 2>/dev/null
+    
+    # Export with JSON format for easier parsing
+    log show --start "$start_time" --style json > "$OUTPUT_DIR/unified_logs/unified_log.json" 2>/dev/null
+    
+    # Collect specific subsystems of interest
+    log "INFO" "Collecting security-relevant unified log subsystems..."
+    
+    # Authentication events
+    log show --start "$start_time" --predicate 'subsystem == "com.apple.opendirectoryd"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/opendirectoryd.txt" 2>/dev/null
+    
+    # Authorization events
+    log show --start "$start_time" --predicate 'subsystem == "com.apple.Authorization"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/authorization.txt" 2>/dev/null
+    
+    # Endpoint Security events
+    log show --start "$start_time" --predicate 'subsystem == "com.apple.endpointsecurity"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/endpoint_security.txt" 2>/dev/null
+    
+    # XProtect events
+    log show --start "$start_time" --predicate 'subsystem == "com.apple.XProtect"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/xprotect.txt" 2>/dev/null
+    
+    # Gatekeeper events
+    log show --start "$start_time" --predicate 'subsystem == "com.apple.syspolicy"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/gatekeeper.txt" 2>/dev/null
+    
+    # SSH events
+    log show --start "$start_time" --predicate 'process == "sshd"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/sshd.txt" 2>/dev/null
+    
+    # Sudo events
+    log show --start "$start_time" --predicate 'process == "sudo"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/sudo.txt" 2>/dev/null
+    
+    # Login window events
+    log show --start "$start_time" --predicate 'subsystem == "com.apple.loginwindow"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/loginwindow.txt" 2>/dev/null
+    
+    # Kernel events
+    log show --start "$start_time" --predicate 'sender == "kernel"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/kernel.txt" 2>/dev/null
+    
+    # Santa (if installed)
+    log show --start "$start_time" --predicate 'subsystem == "com.google.santa"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/santa.txt" 2>/dev/null
+    
+    # CrowdStrike (if installed)
+    log show --start "$start_time" --predicate 'subsystem CONTAINS "crowdstrike"' --style syslog \
+        > "$OUTPUT_DIR/unified_logs/crowdstrike.txt" 2>/dev/null
+    
+    echo "unified_logs/ - Unified log export" >> "$MANIFEST_FILE"
+    log "INFO" "Unified logs collected"
+}
+
+collect_audit_logs() {
+    log "INFO" "Collecting BSM audit logs..."
+    
+    # OpenBSM audit logs
+    if [ -d "/var/audit" ]; then
+        collect_file "/var/audit" "audit_logs" "BSM audit logs"
+    fi
+    
+    # Audit control configuration
+    collect_file "/etc/security/audit_control" "audit_logs" "Audit configuration"
+    collect_file "/etc/security/audit_class" "audit_logs" "Audit class definitions"
+    collect_file "/etc/security/audit_event" "audit_logs" "Audit event definitions"
+    
+    log "INFO" "Audit logs collected"
+}
+
+collect_user_logs() {
+    log "INFO" "Collecting user logs..."
+    
+    local user_home
+    user_home=$(eval echo ~"${SUDO_USER:-$USER}")
+    
+    # User library logs
+    if [ -d "$user_home/Library/Logs" ]; then
+        collect_file "$user_home/Library/Logs" "user_logs" "User library logs"
+    fi
+    
+    log "INFO" "User logs collected"
+}
+
+collect_diagnostic_reports() {
+    log "INFO" "Collecting diagnostic/crash reports..."
+    
+    local user_home
+    user_home=$(eval echo ~"${SUDO_USER:-$USER}")
+    
+    # System diagnostic reports
+    collect_file "/Library/Logs/DiagnosticReports" "diagnostic_reports/system" "System crash reports"
+    
+    # User diagnostic reports
+    collect_file "$user_home/Library/Logs/DiagnosticReports" "diagnostic_reports/user" "User crash reports"
+    
+    # Spin reports
+    collect_file "/Library/Logs/Spin Reports" "diagnostic_reports/spin" "System spin reports"
+    
+    log "INFO" "Diagnostic reports collected"
+}
+
+collect_persistence_mechanisms() {
+    log "INFO" "Collecting persistence mechanisms..."
+    
+    local user_home
+    user_home=$(eval echo ~"${SUDO_USER:-$USER}")
+    
+    # System LaunchDaemons
+    collect_file "/Library/LaunchDaemons" "persistence/system_launch_daemons" "System LaunchDaemons"
+    
+    # System LaunchAgents
+    collect_file "/Library/LaunchAgents" "persistence/system_launch_agents" "System LaunchAgents"
+    
+    # User LaunchAgents
+    collect_file "$user_home/Library/LaunchAgents" "persistence/user_launch_agents" "User LaunchAgents"
+    
+    # Apple LaunchDaemons (for comparison/baseline)
+    collect_file "/System/Library/LaunchDaemons" "persistence/apple_launch_daemons" "Apple LaunchDaemons"
+    
+    # Apple LaunchAgents
+    collect_file "/System/Library/LaunchAgents" "persistence/apple_launch_agents" "Apple LaunchAgents"
+    
+    # Cron jobs
+    collect_file "/var/at/tabs" "persistence/cron" "System cron tabs"
+    collect_file "/etc/crontab" "persistence/cron" "System crontab"
+    collect_file "/usr/lib/cron/tabs" "persistence/cron" "User cron tabs"
+    
+    # Periodic scripts
+    collect_file "/etc/periodic" "persistence/periodic" "Periodic scripts"
+    
+    # Login/logout hooks
+    if [ "$DRY_RUN" = false ]; then
+        mkdir -p "$OUTPUT_DIR/persistence/hooks"
+        defaults read com.apple.loginwindow LoginHook > "$OUTPUT_DIR/persistence/hooks/login_hook.txt" 2>/dev/null
+        defaults read com.apple.loginwindow LogoutHook > "$OUTPUT_DIR/persistence/hooks/logout_hook.txt" 2>/dev/null
+    fi
+    
+    # Startup items (legacy)
+    collect_file "/Library/StartupItems" "persistence/startup_items" "Startup items"
+    
+    # Authorization plugins
+    collect_file "/Library/Security/SecurityAgentPlugins" "persistence/auth_plugins" "Authorization plugins"
+    
+    # Kernel extensions
+    collect_file "/Library/Extensions" "persistence/kernel_extensions" "Third-party kernel extensions"
+    
+    # System extensions
+    if [ "$DRY_RUN" = false ]; then
+        mkdir -p "$OUTPUT_DIR/persistence/system_extensions"
+        systemextensionsctl list > "$OUTPUT_DIR/persistence/system_extensions/list.txt" 2>/dev/null
+    fi
+    
+    # Login items (user)
+    collect_file "$user_home/Library/Application Support/com.apple.backgroundtaskmanagementagent" \
+        "persistence/login_items" "Background task management"
+    
+    log "INFO" "Persistence mechanisms collected"
+}
+
+collect_network_info() {
+    log "INFO" "Collecting network information..."
+    
+    if [ "$DRY_RUN" = true ]; then
+        log "INFO" "Would collect: Network configuration and logs"
+        return 0
+    fi
+    
+    mkdir -p "$OUTPUT_DIR/network"
+    
+    # Network interfaces
+    ifconfig -a > "$OUTPUT_DIR/network/interfaces.txt" 2>/dev/null
+    
+    # Routing table
+    netstat -rn > "$OUTPUT_DIR/network/routes.txt" 2>/dev/null
+    
+    # ARP cache
+    arp -a > "$OUTPUT_DIR/network/arp_cache.txt" 2>/dev/null
+    
+    # DNS configuration
+    scutil --dns > "$OUTPUT_DIR/network/dns_config.txt" 2>/dev/null
+    cat /etc/resolv.conf > "$OUTPUT_DIR/network/resolv_conf.txt" 2>/dev/null
+    
+    # Active connections
+    lsof -i -P -n > "$OUTPUT_DIR/network/connections.txt" 2>/dev/null
+    
+    # Firewall status
+    /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate > "$OUTPUT_DIR/network/firewall_status.txt" 2>/dev/null
+    /usr/libexec/ApplicationFirewall/socketfilterfw --listapps >> "$OUTPUT_DIR/network/firewall_status.txt" 2>/dev/null
+    
+    # Known networks
+    local user_home
+    user_home=$(eval echo ~"${SUDO_USER:-$USER}")
+    collect_file "$user_home/Library/Preferences/com.apple.wifi.known-networks.plist" \
+        "network" "Known WiFi networks"
+    
+    # Hosts file
+    collect_file "/etc/hosts" "network" "Hosts file"
+    
+    # SSH known hosts and config
+    collect_file "$user_home/.ssh/known_hosts" "network/ssh" "SSH known hosts"
+    collect_file "$user_home/.ssh/config" "network/ssh" "SSH config"
+    collect_file "/etc/ssh/sshd_config" "network/ssh" "SSHD config"
+    
+    echo "network/ - Network configuration" >> "$MANIFEST_FILE"
+    log "INFO" "Network information collected"
+}
+
+collect_browser_artifacts() {
+    log "INFO" "Collecting browser artifacts..."
+    
+    local user_home
+    user_home=$(eval echo ~"${SUDO_USER:-$USER}")
+    
+    # Safari
+    collect_file "$user_home/Library/Safari/History.db" "browser_artifacts/safari" "Safari history"
+    collect_file "$user_home/Library/Safari/Downloads.plist" "browser_artifacts/safari" "Safari downloads"
+    collect_file "$user_home/Library/Safari/Bookmarks.plist" "browser_artifacts/safari" "Safari bookmarks"
+    collect_file "$user_home/Library/Safari/LastSession.plist" "browser_artifacts/safari" "Safari last session"
+    collect_file "$user_home/Library/Safari/TopSites.plist" "browser_artifacts/safari" "Safari top sites"
+    collect_file "$user_home/Library/Safari/Extensions" "browser_artifacts/safari" "Safari extensions"
+    
+    # Chrome
+    local chrome_dir="$user_home/Library/Application Support/Google/Chrome/Default"
+    if [ -d "$chrome_dir" ]; then
+        collect_file "$chrome_dir/History" "browser_artifacts/chrome" "Chrome history"
+        collect_file "$chrome_dir/Login Data" "browser_artifacts/chrome" "Chrome login data"
+        collect_file "$chrome_dir/Cookies" "browser_artifacts/chrome" "Chrome cookies"
+        collect_file "$chrome_dir/Bookmarks" "browser_artifacts/chrome" "Chrome bookmarks"
+        collect_file "$chrome_dir/Preferences" "browser_artifacts/chrome" "Chrome preferences"
+        collect_file "$chrome_dir/Extensions" "browser_artifacts/chrome" "Chrome extensions"
+    fi
+    
+    # Firefox
+    local firefox_profiles="$user_home/Library/Application Support/Firefox/Profiles"
+    if [ -d "$firefox_profiles" ]; then
+        for profile_dir in "$firefox_profiles"/*/; do
+            if [ -d "$profile_dir" ]; then
+                local profile_name
+                profile_name=$(basename "$profile_dir")
+                collect_file "${profile_dir}places.sqlite" "browser_artifacts/firefox/$profile_name" "Firefox history/bookmarks"
+                collect_file "${profile_dir}cookies.sqlite" "browser_artifacts/firefox/$profile_name" "Firefox cookies"
+                collect_file "${profile_dir}logins.json" "browser_artifacts/firefox/$profile_name" "Firefox logins"
+                collect_file "${profile_dir}extensions.json" "browser_artifacts/firefox/$profile_name" "Firefox extensions"
+            fi
+        done
+    fi
+    
+    # Edge
+    local edge_dir="$user_home/Library/Application Support/Microsoft Edge/Default"
+    if [ -d "$edge_dir" ]; then
+        collect_file "$edge_dir/History" "browser_artifacts/edge" "Edge history"
+        collect_file "$edge_dir/Cookies" "browser_artifacts/edge" "Edge cookies"
+        collect_file "$edge_dir/Bookmarks" "browser_artifacts/edge" "Edge bookmarks"
+    fi
+    
+    log "INFO" "Browser artifacts collected"
+}
+
+collect_user_activity() {
+    log "INFO" "Collecting user activity artifacts..."
+    
+    local user_home
+    user_home=$(eval echo ~"${SUDO_USER:-$USER}")
+    
+    # KnowledgeC database (user activity tracking)
+    collect_file "$user_home/Library/Application Support/Knowledge/knowledgeC.db" \
+        "user_activity" "KnowledgeC database"
+    
+    # Recent items
+    collect_file "$user_home/Library/Application Support/com.apple.sharedfilelist" \
+        "user_activity/recent_items" "Recent items"
+    
+    # Finder preferences (recent folders, etc.)
+    collect_file "$user_home/Library/Preferences/com.apple.finder.plist" \
+        "user_activity" "Finder preferences"
+    
+    # Dock (recent apps)
+    collect_file "$user_home/Library/Preferences/com.apple.dock.plist" \
+        "user_activity" "Dock preferences"
+    
+    # Notification center
+    collect_file "$user_home/Library/Application Support/NotificationCenter" \
+        "user_activity/notifications" "Notification center"
+    
+    # Spotlight shortcuts
+    collect_file "$user_home/Library/Application Support/com.apple.spotlight.Shortcuts" \
+        "user_activity" "Spotlight shortcuts"
+    
+    log "INFO" "User activity artifacts collected"
+}
+
+collect_security_databases() {
+    log "INFO" "Collecting security databases..."
+    
+    local user_home
+    user_home=$(eval echo ~"${SUDO_USER:-$USER}")
+    
+    # TCC (Transparency, Consent, and Control) database
+    collect_file "$user_home/Library/Application Support/com.apple.TCC/TCC.db" \
+        "security_databases" "User TCC database"
+    collect_file "/Library/Application Support/com.apple.TCC/TCC.db" \
+        "security_databases" "System TCC database"
+    
+    # Quarantine events database
+    collect_file "$user_home/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2" \
+        "security_databases" "Quarantine events"
+    
+    # Gatekeeper configuration
+    collect_file "/var/db/SystemPolicy-prefs.plist" \
+        "security_databases" "Gatekeeper preferences"
+    
+    # XProtect data
+    collect_file "/Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.yara" \
+        "security_databases" "XProtect YARA rules"
+    collect_file "/Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.plist" \
+        "security_databases" "XProtect definitions"
+    
+    # MRT (Malware Removal Tool) data
+    collect_file "/Library/Apple/System/Library/CoreServices/MRT.app/Contents/Resources" \
+        "security_databases/mrt" "MRT resources"
+    
+    log "INFO" "Security databases collected"
+}
+
+collect_shell_history() {
+    log "INFO" "Collecting shell history..."
+    
+    local user_home
+    user_home=$(eval echo ~"${SUDO_USER:-$USER}")
+    
+    # Bash history
+    collect_file "$user_home/.bash_history" "shell_history" "Bash history"
+    collect_file "$user_home/.bash_profile" "shell_history" "Bash profile"
+    collect_file "$user_home/.bashrc" "shell_history" "Bashrc"
+    
+    # Zsh history
+    collect_file "$user_home/.zsh_history" "shell_history" "Zsh history"
+    collect_file "$user_home/.zshrc" "shell_history" "Zshrc"
+    collect_file "$user_home/.zprofile" "shell_history" "Zsh profile"
+    
+    # Fish history
+    collect_file "$user_home/.local/share/fish/fish_history" "shell_history" "Fish history"
+    
+    # Python history
+    collect_file "$user_home/.python_history" "shell_history" "Python history"
+    
+    # MySQL history
+    collect_file "$user_home/.mysql_history" "shell_history" "MySQL history"
+    
+    # SQLite history
+    collect_file "$user_home/.sqlite_history" "shell_history" "SQLite history"
+    
+    # Less history
+    collect_file "$user_home/.lesshst" "shell_history" "Less history"
+    
+    log "INFO" "Shell history collected"
+}
+
+collect_application_artifacts() {
+    log "INFO" "Collecting application artifacts..."
+    
+    local user_home
+    user_home=$(eval echo ~"${SUDO_USER:-$USER}")
+    
+    # Installed applications list
+    if [ "$DRY_RUN" = false ]; then
+        mkdir -p "$OUTPUT_DIR/applications"
+        ls -la /Applications > "$OUTPUT_DIR/applications/applications_list.txt" 2>/dev/null
+        ls -la "$user_home/Applications" >> "$OUTPUT_DIR/applications/applications_list.txt" 2>/dev/null
+        
+        # Homebrew packages (if installed)
+        if command -v brew &> /dev/null; then
+            brew list > "$OUTPUT_DIR/applications/homebrew_packages.txt" 2>/dev/null
+            brew list --cask > "$OUTPUT_DIR/applications/homebrew_casks.txt" 2>/dev/null
+        fi
+        
+        # pip packages (if installed)
+        if command -v pip3 &> /dev/null; then
+            pip3 list > "$OUTPUT_DIR/applications/pip_packages.txt" 2>/dev/null
+        fi
+    fi
+    
+    # Terminal preferences
+    collect_file "$user_home/Library/Preferences/com.apple.Terminal.plist" \
+        "applications" "Terminal preferences"
+    
+    # iTerm2 preferences
+    collect_file "$user_home/Library/Preferences/com.googlecode.iterm2.plist" \
+        "applications" "iTerm2 preferences"
+    
+    log "INFO" "Application artifacts collected"
+}
+
+generate_hashes() {
+    if [ "$DRY_RUN" = true ]; then
+        log "INFO" "DRY RUN: Would generate SHA256 hashes"
+        return 0
+    fi
+    
+    log "INFO" "Generating SHA256 hashes for collected files..."
+    
+    find "$OUTPUT_DIR" -type f ! -name "hashes.sha256" ! -name "collection.log" -print0 | \
+        while IFS= read -r -d '' file; do
+            shasum -a 256 "$file" >> "$HASH_FILE" 2>/dev/null
+        done
+    
+    log "INFO" "Hashes generated"
+}
+
+compress_collection() {
+    if [ "$DRY_RUN" = true ]; then
+        log "INFO" "DRY RUN: Would compress collection to .tar.gz"
+        return 0
+    fi
+    
+    log "INFO" "Compressing collection..."
+    
+    local parent_dir
+    local dir_name
+    parent_dir=$(dirname "$OUTPUT_DIR")
+    dir_name=$(basename "$OUTPUT_DIR")
+    
+    tar -czf "${OUTPUT_DIR}.tar.gz" -C "$parent_dir" "$dir_name" 2>/dev/null
+    
+    if [ $? -eq 0 ]; then
+        log "INFO" "Collection compressed to: ${OUTPUT_DIR}.tar.gz"
+        
+        # Generate hash of archive
+        shasum -a 256 "${OUTPUT_DIR}.tar.gz" > "${OUTPUT_DIR}.tar.gz.sha256"
+        log "INFO" "Archive hash: ${OUTPUT_DIR}.tar.gz.sha256"
+    else
+        log "WARN" "Failed to compress collection"
+    fi
+}
+
+# --- Main ---
+
+main() {
+    echo ""
+    echo "======================================"
+    echo "  macOS IR Log Collector v${SCRIPT_VERSION}"
+    echo "======================================"
+    echo ""
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            -v|--verbose)
+                VERBOSE=true
+                shift
+                ;;
+            -u|--unified-hours)
+                UNIFIED_LOG_HOURS="$2"
+                shift 2
+                ;;
+            --no-unified)
+                COLLECT_UNIFIED_LOGS=false
+                shift
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -*)
+                echo "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+            *)
+                OUTPUT_DIR="$1"
+                shift
+                ;;
+        esac
+    done
+    
+    # Check privileges
+    check_sudo
+    
+    # Initialise collection
+    init_collection
+    
+    # Run collections
+    collect_system_info
+    collect_system_logs
+    collect_unified_logs
+    collect_audit_logs
+    collect_user_logs
+    collect_diagnostic_reports
+    collect_persistence_mechanisms
+    collect_network_info
+    collect_browser_artifacts
+    collect_user_activity
+    collect_security_databases
+    collect_shell_history
+    collect_application_artifacts
+    
+    # Finalise
+    generate_hashes
+    compress_collection
+    
+    echo ""
+    echo "======================================"
+    echo "  Collection Complete"
+    echo "======================================"
+    echo ""
+    
+    if [ "$DRY_RUN" = false ]; then
+        log "INFO" "Output directory: $OUTPUT_DIR"
+        log "INFO" "Compressed archive: ${OUTPUT_DIR}.tar.gz"
+        log "INFO" "Manifest: $MANIFEST_FILE"
+        log "INFO" "Hashes: $HASH_FILE"
+        
+        # Show size
+        local size
+        size=$(du -sh "$OUTPUT_DIR" 2>/dev/null | cut -f1)
+        log "INFO" "Total size: $size"
+    fi
+    
+    echo ""
+}
+
+main "$@"
