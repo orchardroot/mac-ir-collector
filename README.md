@@ -8,15 +8,15 @@ A comprehensive incident response log collection script for macOS. Collects fore
 - **Unified Logs:** Exports Apple unified logs with targeted collection of security-relevant subsystems (authentication, sudo, SSH, kernel, XProtect, Gatekeeper, Endpoint Security).
 - **Audit Logs:** BSM audit logs and configuration from `/var/audit`.
 - **Persistence Mechanisms:** LaunchDaemons, LaunchAgents, cron jobs, periodic scripts, login hooks, kernel extensions, system extensions, and authorization plugins.
-- **Network Information:** Detailed network interface configuration, routing tables, ARP cache, DNS config, **active connections (lsof provides process information, netstat provides a comprehensive list)**, and **comprehensive firewall rules (socketfilterfw --listall)**.
-- **Browser Artifacts:** Raw history, cookies, downloads, bookmarks, and extensions for Safari, Chrome, Firefox, and Edge. **Includes parsed URLs, downloads, and search terms from Chrome and Firefox SQLite databases.**
+- **Network Information:** Interface configuration, routing tables, ARP cache, DNS config, active connections (lsof and netstat), and comprehensive firewall status.
+- **Browser Artifacts:** Raw history databases plus parsed URLs, downloads, bookmarks, and search terms for Chrome and Firefox. Also collects Safari and Edge artifacts.
 - **User Activity:** KnowledgeC database, recent items, Finder/Dock preferences, and Notification Center data.
 - **Security Databases:** TCC (privacy permissions), quarantine events, XProtect rules, and Gatekeeper configuration.
 - **Shell History:** bash, zsh, fish, python, mysql, and sqlite history files.
-- **Configuration Files:** Collects various system and user configuration files, including shell profiles (.bashrc, .zshrc), SSH configs (.ssh/config, known_hosts), system-wide configurations (/etc/hosts, /etc/sudoers), and other common dotfiles and directories (.gitconfig, .vimrc, .aws, .kube).
+- **Configuration Files:** Shell profiles, SSH configs, system configuration, and credential directories (.aws, .kube, .gnupg).
 - **Diagnostic Reports:** Crash reports and spin reports.
 - **Integrity Verification:** SHA256 hashes generated for all collected files and the final archive.
-- **Robust Error Logging:** Commands redirect errors to a dedicated `error_collection.log` file for better traceability.
+- **Error Logging:** Commands that fail are logged to a dedicated `error_collection.log` file.
 - **Dry Run Mode:** Preview what would be collected without copying files.
 - **Auto-Compression:** Creates a `.tar.gz` archive with separate hash file.
 
@@ -74,11 +74,23 @@ IR_Collection_<hostname>_<timestamp>/
 ├── persistence/            # LaunchAgents, LaunchDaemons, etc.
 ├── network/                # Network configuration and logs
 ├── browser_artifacts/      # Browser history databases and parsed output
+│   ├── safari/             # Raw Safari artifacts
+│   ├── chrome/             # Raw Chrome artifacts
+│   ├── chrome_parsed/      # Parsed Chrome URLs, downloads, search terms
+│   ├── firefox/            # Raw Firefox artifacts
+│   ├── firefox_parsed/     # Parsed Firefox URLs, bookmarks
+│   └── edge/               # Raw Edge artifacts
 ├── user_activity/          # KnowledgeC, recent items, etc.
 ├── security_databases/     # TCC, quarantine events
 ├── shell_history/          # Bash/zsh history files
-├── applications/           # Installed applications list
-└── config_files/           # Various system and user configuration files
+├── config_files/           # System and user configuration files
+│   ├── user/               # User shell profiles and dotfiles
+│   ├── user_ssh/           # User SSH config (not private keys)
+│   ├── user_dirs/          # .config, .aws, .kube, .gnupg directories
+│   ├── system/             # System configuration files
+│   ├── system_ssh/         # System SSH configuration
+│   └── system_dirs/        # PAM and security directories
+└── applications/           # Installed applications list
 ```
 
 ## Important Notes
@@ -86,8 +98,9 @@ IR_Collection_<hostname>_<timestamp>/
 - Run with `sudo` for complete collection. Some artifacts require root privileges.
 - Unified log export can take several minutes depending on the time range.
 - Use `--no-unified` for faster collection when unified logs are not required.
-- The script will warn but continue if it cannot access certain files or execute commands due to permissions or other issues. Details of such failures will be logged in `error_collection.log`.
-- Browser artifacts are copied as-is; browsers do not need to be closed.
+- The script will warn but continue if it cannot access certain files or execute commands due to permissions. Details are logged in `error_collection.log`.
+- Browser artifacts are copied as raw database files first, then parsed. If browsers are running, parsed output may be incomplete due to database locks, but raw copies will still be available.
+- **Sensitive data warning:** The script collects credential directories (`.aws`, `.kube`, `.gnupg`) which may contain secrets. Handle the collection archive securely.
 - Output is automatically compressed to `.tar.gz` with a separate SHA256 hash file for the archive.
 
 ## Supported EDR/Security Tool Logs
@@ -105,6 +118,22 @@ The unified log collection includes targeted extraction for:
 - macOS 10.12 (Sierra) or later
 - bash shell
 - Root privileges recommended for full collection
+- sqlite3 (included with macOS) for browser history parsing
+
+## Changelog
+
+### v1.1.0
+- Added browser history parsing for Chrome and Firefox (URLs, downloads, search terms, bookmarks)
+- Added configuration file collection (shell profiles, SSH configs, credential directories)
+- Added separate error log file (`error_collection.log`)
+- Added browser process detection warnings for SQLite parsing
+- Added sensitive credential directory warning
+- Fixed firewall collection to use valid macOS socketfilterfw flags
+- Fixed Firefox SQLite queries to use correct schema
+- Improved hash generation to properly handle control files
+
+### v1.0.0
+- Initial release
 
 ## License
 
