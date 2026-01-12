@@ -7,13 +7,13 @@
 # investigation and incident response purposes.
 #
 # Author: orchardroot
-# Version: 1.0.0
+# Version: 1.1.0
 # =============================================================================
 
 set -uo pipefail
 
 # --- Configuration ---
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 HOSTNAME=$(hostname -s)
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUTPUT_DIR="${1:-$HOME/Desktop/IR_Collection_${HOSTNAME}_${TIMESTAMP}}"
@@ -71,6 +71,7 @@ NOTES:
 OUTPUT STRUCTURE:
   IR_Collection_<hostname>_<timestamp>/
   ├── collection.log          # Collection activity log
+  ├── error_collection.log    # Log of commands that encountered errors
   ├── manifest.txt            # List of all collected files
   ├── hashes.sha256           # SHA256 hashes for integrity
   ├── system_info.txt         # Basic system information
@@ -81,10 +82,12 @@ OUTPUT STRUCTURE:
   ├── diagnostic_reports/     # Crash reports
   ├── persistence/            # LaunchAgents, LaunchDaemons, etc.
   ├── network/                # Network configuration and logs
-  ├── browser_artifacts/      # Browser history databases
+  ├── browser_artifacts/      # Browser history databases and parsed output
   ├── user_activity/          # KnowledgeC, recent items, etc.
   ├── security_databases/     # TCC, quarantine events
-  └── shell_history/          # Bash/zsh history files
+  ├── shell_history/          # Bash/zsh history files
+  ├── config_files/           # System and user configuration files
+  └── applications/           # Installed applications list
 
 EOF
 }
@@ -123,6 +126,11 @@ check_sudo() {
         return 1
     fi
     return 0
+}
+
+check_process_running() {
+    local process_name="$1"
+    pgrep -x "$process_name" > /dev/null 2>&1
 }
 
 init_collection() {
@@ -215,7 +223,7 @@ collect_with_find() {
     
     local find_cmd="find \"$search_path\""
     [ -n "$max_depth" ] && find_cmd="$find_cmd -maxdepth $max_depth"
-    find_cmd="$find_cmd -name \"$pattern\" -type f 2>> "$ERROR_LOG_FILE""
+    find_cmd="$find_cmd -name \"$pattern\" -type f 2>> \"$ERROR_LOG_FILE\""
     
     local count=0
     while IFS= read -r file; do
@@ -270,7 +278,7 @@ collect_system_info() {
         ps aux
         echo ""
         echo "=== NETWORK CONNECTIONS ==="
-        netstat -an 2>> "$ERROR_LOG_FILE" || log "WARN" "netstat command failed. Check $ERROR_LOG_FILE for details."
+        netstat -an 2>> "$ERROR_LOG_FILE" || echo "netstat command failed"
         echo ""
         echo "=== LISTENING PORTS ==="
         lsof -i -P -n 2>> "$ERROR_LOG_FILE" | head -100
@@ -472,8 +480,8 @@ collect_persistence_mechanisms() {
     # Login/logout hooks
     if [ "$DRY_RUN" = false ]; then
         mkdir -p "$OUTPUT_DIR/persistence/hooks"
-        defaults read com.apple.loginwindow LoginHook > "$OUTPUT_DIR/persistence/hooks/login_hook.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect LoginHook. Check $ERROR_LOG_FILE."
-        defaults read com.apple.loginwindow LogoutHook > "$OUTPUT_DIR/persistence/hooks/logout_hook.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect LogoutHook. Check $ERROR_LOG_FILE."
+        defaults read com.apple.loginwindow LoginHook > "$OUTPUT_DIR/persistence/hooks/login_hook.txt" 2>> "$ERROR_LOG_FILE" || log_verbose "No LoginHook configured"
+        defaults read com.apple.loginwindow LogoutHook > "$OUTPUT_DIR/persistence/hooks/logout_hook.txt" 2>> "$ERROR_LOG_FILE" || log_verbose "No LogoutHook configured"
     fi
     
     # Startup items (legacy)
@@ -524,19 +532,38 @@ collect_network_info() {
     # Active connections (lsof) - provides process info and open files
     lsof -i -P -n > "$OUTPUT_DIR/network/active_connections_lsof.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect active connections via lsof. Check $ERROR_LOG_FILE."
     
-    # Active connections (netstat for comprehensive list, without process info which is covered by lsof)
-    netstat -f inet -an > "$OUTPUT_DIR/network/active_connections_netstat_tcp_udp.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect active TCP/UDP connections via netstat. Check $ERROR_LOG_FILE."
+    # Active connections (netstat for comprehensive list)
+    netstat -f inet -an > "$OUTPUT_DIR/network/active_connections_netstat.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect active connections via netstat. Check $ERROR_LOG_FILE."
     
-    # Firewall status and rules
-    /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate > "$OUTPUT_DIR/network/firewall_status.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to get firewall global state. Check $ERROR_LOG_FILE."
-    /usr/libexec/ApplicationFirewall/socketfilterfw --listapps >> "$OUTPUT_DIR/network/firewall_status.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list firewall apps. Check $ERROR_LOG_FILE."
-    /usr/libexec/ApplicationFirewall/socketfilterfw --listall > "$OUTPUT_DIR/network/firewall_rules_detailed.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list detailed firewall rules. Check $ERROR_LOG_FILE."
+    # Firewall status and rules (using valid macOS socketfilterfw flags)
+    {
+        echo "=== Firewall Global State ==="
+        /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>> "$ERROR_LOG_FILE"
+        echo ""
+        echo "=== Firewall Block All ==="
+        /usr/libexec/ApplicationFirewall/socketfilterfw --getblockall 2>> "$ERROR_LOG_FILE"
+        echo ""
+        echo "=== Firewall Allow Signed ==="
+        /usr/libexec/ApplicationFirewall/socketfilterfw --getallowsigned 2>> "$ERROR_LOG_FILE"
+        echo ""
+        echo "=== Firewall Stealth Mode ==="
+        /usr/libexec/ApplicationFirewall/socketfilterfw --getstealthmode 2>> "$ERROR_LOG_FILE"
+        echo ""
+        echo "=== Firewall Logging ==="
+        /usr/libexec/ApplicationFirewall/socketfilterfw --getloggingmode 2>> "$ERROR_LOG_FILE"
+        echo ""
+        echo "=== Firewall Applications ==="
+        /usr/libexec/ApplicationFirewall/socketfilterfw --listapps 2>> "$ERROR_LOG_FILE"
+    } > "$OUTPUT_DIR/network/firewall_status.txt" || log "WARN" "Failed to collect firewall status. Check $ERROR_LOG_FILE."
     
     # Known networks
     local user_home
     user_home=$(eval echo ~"${SUDO_USER:-$USER}")
     collect_file "$user_home/Library/Preferences/com.apple.wifi.known-networks.plist" \
         "network" "Known WiFi networks"
+    
+    # Hosts file
+    collect_file "/etc/hosts" "network" "Hosts file"
     
     echo "network/ - Network configuration" >> "$MANIFEST_FILE"
     log "INFO" "Network information collected"
@@ -555,20 +582,24 @@ dump_chrome_history() {
         return 1
     fi
 
-    log "INFO" "Dumping Chrome history from $history_db..."
+    # Check if Chrome is running - warn but continue (we have the raw copy)
+    if check_process_running "Google Chrome"; then
+        log "WARN" "Chrome is running. SQLite queries may return incomplete results. Raw database has been copied."
+    fi
+
+    log "INFO" "Parsing Chrome history from $history_db..."
     mkdir -p "$output_dir"
 
     # Dump URLs
-    sqlite3 "$history_db" "SELECT datetime(last_visit_time / 1000000 + strftime('%s', '1601-01-01'), 'unixepoch') AS 'Last Visit Time', url, title, visit_count FROM urls ORDER BY last_visit_time DESC;" > "$output_dir/chrome_urls.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Chrome URLs. Check $ERROR_LOG_FILE."
+    sqlite3 "$history_db" "SELECT datetime(last_visit_time / 1000000 + strftime('%s', '1601-01-01'), 'unixepoch', 'localtime') AS 'Last Visit Time', url, title, visit_count FROM urls ORDER BY last_visit_time DESC;" > "$output_dir/chrome_urls.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to parse Chrome URLs. Check $ERROR_LOG_FILE."
 
     # Dump Downloads
-    sqlite3 "$history_db" "SELECT datetime(start_time / 1000000 + strftime('%s', '1601-01-01'), 'unixepoch') AS 'Start Time', current_path, target_path, tab_url, total_bytes FROM downloads ORDER BY start_time DESC;" > "$output_dir/chrome_downloads.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Chrome downloads. Check $ERROR_LOG_FILE."
+    sqlite3 "$history_db" "SELECT datetime(start_time / 1000000 + strftime('%s', '1601-01-01'), 'unixepoch', 'localtime') AS 'Start Time', current_path, target_path, tab_url, total_bytes FROM downloads ORDER BY start_time DESC;" > "$output_dir/chrome_downloads.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to parse Chrome downloads. Check $ERROR_LOG_FILE."
 
-    # Dump Search Terms (from Keyword Search Terms table if available, or by parsing visits)
-    # This query might need adjustment based on Chrome version/schema
-    sqlite3 "$history_db" "SELECT term FROM keyword_search_terms ORDER BY id DESC;" > "$output_dir/chrome_search_terms.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Chrome search terms. Check $ERROR_LOG_FILE."
+    # Dump Search Terms
+    sqlite3 "$history_db" "SELECT keyword_search_terms.term, urls.url, datetime(urls.last_visit_time / 1000000 + strftime('%s', '1601-01-01'), 'unixepoch', 'localtime') AS 'Last Visit' FROM keyword_search_terms JOIN urls ON keyword_search_terms.url_id = urls.id ORDER BY urls.last_visit_time DESC;" > "$output_dir/chrome_search_terms.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to parse Chrome search terms. Check $ERROR_LOG_FILE."
 
-    log "INFO" "Chrome history dumped to $output_dir"
+    log "INFO" "Chrome history parsed to $output_dir"
     echo "browser_artifacts/chrome_parsed/ - Parsed Chrome history" >> "$MANIFEST_FILE"
 }
 
@@ -584,43 +615,43 @@ dump_firefox_history() {
         return 1
     fi
 
-    log "INFO" "Dumping Firefox history..."
+    # Check if Firefox is running - warn but continue (we have the raw copy)
+    if check_process_running "firefox"; then
+        log "WARN" "Firefox is running. SQLite queries may return incomplete results. Raw database has been copied."
+    fi
+
+    log "INFO" "Parsing Firefox history..."
     mkdir -p "$output_parent_dir"
 
     for profile_dir in "$firefox_profiles_dir"/*/; do
         if [ -d "$profile_dir" ]; then
-            local profile_name=$(basename "$profile_dir")
+            local profile_name
+            profile_name=$(basename "$profile_dir")
             local places_db="${profile_dir}places.sqlite"
-            local downloads_db="${profile_dir}downloads.sqlite" # Often combined into places.sqlite in newer versions
 
             local output_dir="$output_parent_dir/$profile_name"
             mkdir -p "$output_dir"
 
             if [ -f "$places_db" ]; then
-                log "INFO" "Dumping Firefox history for profile '$profile_name' from $places_db..."
-                # Dump URLs and visit times
-                sqlite3 "$places_db" "SELECT datetime(moz_places.last_visit_date / 1000000, 'unixepoch') AS 'Last Visit Time', moz_places.url, moz_places.title, moz_places.visit_count FROM moz_places ORDER BY moz_places.last_visit_date DESC;" > "$output_dir/firefox_urls.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Firefox URLs for profile $profile_name. Check $ERROR_LOG_FILE."
+                log "INFO" "Parsing Firefox history for profile '$profile_name'..."
                 
-                # Dump recent downloads (if still in places.sqlite)
-                sqlite3 "$places_db" "SELECT datetime(annos.date / 1000000, 'unixepoch') AS 'Download Date', a.content AS 'Download Path', p.url AS 'Source URL' FROM moz_annos AS annos JOIN moz_items_annos AS ia ON annos.id = ia.anno_id JOIN moz_places AS p ON ia.item_id = p.id JOIN moz_annotations AS a ON annos.anno_id = a.id WHERE a.item_id = ia.item_id AND a.anno_attribute_id = (SELECT id FROM moz_anno_attributes WHERE name = 'download/path') ORDER BY annos.date DESC;" > "$output_dir/firefox_downloads_from_places.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Firefox downloads from places.sqlite for profile $profile_name. Check $ERROR_LOG_FILE."
+                # Dump URLs and visit times
+                sqlite3 "$places_db" "SELECT datetime(moz_places.last_visit_date / 1000000, 'unixepoch', 'localtime') AS 'Last Visit Time', moz_places.url, moz_places.title, moz_places.visit_count FROM moz_places WHERE last_visit_date IS NOT NULL ORDER BY moz_places.last_visit_date DESC;" > "$output_dir/firefox_urls.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to parse Firefox URLs for profile $profile_name. Check $ERROR_LOG_FILE."
+                
+                # Dump bookmarks
+                sqlite3 "$places_db" "SELECT datetime(moz_bookmarks.dateAdded / 1000000, 'unixepoch', 'localtime') AS 'Date Added', moz_bookmarks.title, moz_places.url FROM moz_bookmarks JOIN moz_places ON moz_bookmarks.fk = moz_places.id WHERE moz_bookmarks.type = 1 ORDER BY moz_bookmarks.dateAdded DESC;" > "$output_dir/firefox_bookmarks.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to parse Firefox bookmarks for profile $profile_name. Check $ERROR_LOG_FILE."
+                
+                # Dump annotations (if any exist)
+                sqlite3 "$places_db" "SELECT datetime(moz_annos.dateAdded / 1000000, 'unixepoch', 'localtime') AS 'Date', moz_annos.content, moz_places.url FROM moz_annos JOIN moz_places ON moz_annos.place_id = moz_places.id ORDER BY moz_annos.dateAdded DESC;" > "$output_dir/firefox_annotations.txt" 2>> "$ERROR_LOG_FILE" || log_verbose "No Firefox annotations for profile $profile_name"
 
+                echo "browser_artifacts/firefox_parsed/$profile_name/ - Parsed Firefox history for profile $profile_name" >> "$MANIFEST_FILE"
             else
                 log_verbose "Firefox places.sqlite not found for profile $profile_name at $places_db"
             fi
-
-            if [ -f "$downloads_db" ]; then
-                log "INFO" "Dumping Firefox downloads for profile '$profile_name' from $downloads_db..."
-                # Dump downloads from separate downloads.sqlite if it exists
-                sqlite3 "$downloads_db" "SELECT datetime(startTime / 1000, 'unixepoch') AS 'Start Time', target, source, state FROM moz_downloads ORDER BY startTime DESC;" > "$output_dir/firefox_downloads.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Firefox downloads for profile $profile_name. Check $ERROR_LOG_FILE."
-            else
-                log_verbose "Firefox downloads.sqlite not found for profile $profile_name at $downloads_db"
-            fi
-            echo "browser_artifacts/firefox_parsed/$profile_name/ - Parsed Firefox history for profile $profile_name" >> "$MANIFEST_FILE"
         fi
     done
-    log "INFO" "Firefox history dumped to $output_parent_dir"
+    log "INFO" "Firefox history parsed to $output_parent_dir"
 }
-
 
 collect_browser_artifacts() {
     log "INFO" "Collecting browser artifacts..."
@@ -636,7 +667,7 @@ collect_browser_artifacts() {
     collect_file "$user_home/Library/Safari/TopSites.plist" "browser_artifacts/safari" "Safari top sites"
     collect_file "$user_home/Library/Safari/Extensions" "browser_artifacts/safari" "Safari extensions"
     
-    # Chrome
+    # Chrome - collect raw files first
     local chrome_dir="$user_home/Library/Application Support/Google/Chrome/Default"
     if [ -d "$chrome_dir" ]; then
         collect_file "$chrome_dir/History" "browser_artifacts/chrome" "Chrome history"
@@ -645,10 +676,13 @@ collect_browser_artifacts() {
         collect_file "$chrome_dir/Bookmarks" "browser_artifacts/chrome" "Chrome bookmarks"
         collect_file "$chrome_dir/Preferences" "browser_artifacts/chrome" "Chrome preferences"
         collect_file "$chrome_dir/Extensions" "browser_artifacts/chrome" "Chrome extensions"
-        dump_chrome_history "$user_home" "$OUTPUT_DIR"
+        # Parse history if not dry run
+        if [ "$DRY_RUN" = false ]; then
+            dump_chrome_history "$user_home" "$OUTPUT_DIR"
+        fi
     fi
     
-    # Firefox
+    # Firefox - collect raw files first
     local firefox_profiles="$user_home/Library/Application Support/Firefox/Profiles"
     if [ -d "$firefox_profiles" ]; then
         for profile_dir in "$firefox_profiles"/*/; do
@@ -659,9 +693,13 @@ collect_browser_artifacts() {
                 collect_file "${profile_dir}cookies.sqlite" "browser_artifacts/firefox/$profile_name" "Firefox cookies"
                 collect_file "${profile_dir}logins.json" "browser_artifacts/firefox/$profile_name" "Firefox logins"
                 collect_file "${profile_dir}extensions.json" "browser_artifacts/firefox/$profile_name" "Firefox extensions"
+                collect_file "${profile_dir}formhistory.sqlite" "browser_artifacts/firefox/$profile_name" "Firefox form history"
             fi
         done
-        dump_firefox_history "$user_home" "$OUTPUT_DIR"
+        # Parse history if not dry run
+        if [ "$DRY_RUN" = false ]; then
+            dump_firefox_history "$user_home" "$OUTPUT_DIR"
+        fi
     fi
     
     # Edge
@@ -781,7 +819,7 @@ collect_application_artifacts() {
     if [ "$DRY_RUN" = false ]; then
         mkdir -p "$OUTPUT_DIR/applications"
         ls -la /Applications > "$OUTPUT_DIR/applications/applications_list.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list /Applications. Check $ERROR_LOG_FILE."
-        ls -la "$user_home/Applications" >> "$OUTPUT_DIR/applications/applications_list.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list user Applications. Check $ERROR_LOG_FILE."
+        ls -la "$user_home/Applications" >> "$OUTPUT_DIR/applications/applications_list.txt" 2>> "$ERROR_LOG_FILE" || log_verbose "No user Applications folder"
         
         # Homebrew packages (if installed)
         if command -v brew &> /dev/null; then
@@ -812,7 +850,7 @@ collect_config_files() {
     local user_home
     user_home=$(eval echo ~"${SUDO_USER:-$USER}")
     
-    # User-specific configuration files (moved from collect_shell_history and collect_network_info, and new ones)
+    # User shell configuration files
     collect_file "$user_home/.bash_profile" "config_files/user" "User Bash profile"
     collect_file "$user_home/.bashrc" "config_files/user" "User Bashrc"
     collect_file "$user_home/.zshrc" "config_files/user" "User Zshrc"
@@ -821,19 +859,25 @@ collect_config_files() {
     collect_file "$user_home/.cshrc" "config_files/user" "User Cshrc"
     collect_file "$user_home/.tcshrc" "config_files/user" "User Tcshrc"
     collect_file "$user_home/.login" "config_files/user" "User Login script"
+    
+    # User application configuration
     collect_file "$user_home/.gitconfig" "config_files/user" "User Git configuration"
     collect_file "$user_home/.vimrc" "config_files/user" "User Vim configuration"
     collect_file "$user_home/.inputrc" "config_files/user" "User Inputrc"
     
-    # User-specific directories (copy recursively)
+    # User SSH configuration (not private keys)
+    collect_file "$user_home/.ssh/known_hosts" "config_files/user_ssh" "User SSH known hosts"
+    collect_file "$user_home/.ssh/config" "config_files/user_ssh" "User SSH config"
+    collect_file "$user_home/.ssh/authorized_keys" "config_files/user_ssh" "User SSH authorized keys"
+    
+    # User directories with potential credentials - log warning
+    log "WARN" "Collecting credential directories (.gnupg, .aws, .kube) - these may contain sensitive keys"
     collect_file "$user_home/.config" "config_files/user_dirs" "User .config directory"
     collect_file "$user_home/.gnupg" "config_files/user_dirs" "User GnuPG directory"
     collect_file "$user_home/.aws" "config_files/user_dirs" "User AWS configuration directory"
     collect_file "$user_home/.kube" "config_files/user_dirs" "User Kubernetes configuration directory"
-    collect_file "$user_home/.ssh/known_hosts" "config_files/user_ssh" "User SSH known hosts"
-    collect_file "$user_home/.ssh/config" "config_files/user_ssh" "User SSH config"
     
-    # System-wide configuration files (moved from collect_network_info and new ones)
+    # System-wide configuration files
     collect_file "/etc/hosts" "config_files/system" "System Hosts file"
     collect_file "/etc/profile" "config_files/system" "System profile"
     collect_file "/etc/shells" "config_files/system" "System shells"
@@ -844,7 +888,7 @@ collect_config_files() {
     collect_file "/etc/sysctl.conf" "config_files/system" "System sysctl configuration"
     collect_file "/etc/ssh/sshd_config" "config_files/system_ssh" "System SSHD config"
     
-    # System-wide directories (copy recursively)
+    # System directories
     collect_file "/etc/pam.d" "config_files/system_dirs" "System PAM directory"
     collect_file "/etc/security" "config_files/system_dirs" "System security directory"
 
@@ -859,30 +903,38 @@ generate_hashes() {
     
     log "INFO" "Generating SHA256 hashes for collected files..."
     
-    # Ensure the hash file itself is excluded from hashing
+    # Exclude control files from initial hashing
     local hash_file_basename
     hash_file_basename=$(basename "$HASH_FILE")
     local log_file_basename
     log_file_basename=$(basename "$LOG_FILE")
     local manifest_file_basename
     manifest_file_basename=$(basename "$MANIFEST_FILE")
+    local error_log_basename
+    error_log_basename=$(basename "$ERROR_LOG_FILE")
 
     find "$OUTPUT_DIR" -type f \
         ! -name "$hash_file_basename" \
         ! -name "$log_file_basename" \
         ! -name "$manifest_file_basename" \
+        ! -name "$error_log_basename" \
         -print0 | while IFS= read -r -d '' file; do
-        shasum -a 256 "$file" >> "$HASH_FILE" 2>/dev/null || log "WARN" "Failed to hash file: $file"
+        shasum -a 256 "$file" >> "$HASH_FILE" 2>/dev/null || log_verbose "Failed to hash file: $file"
     done
     
-    # Hash the manifest file itself after all other files are processed and listed
+    # Hash the manifest file itself after all other files are processed
     if [ -f "$MANIFEST_FILE" ]; then
-        shasum -a 256 "$MANIFEST_FILE" >> "$HASH_FILE" 2>/dev/null || log "WARN" "Failed to hash manifest file: $MANIFEST_FILE"
+        shasum -a 256 "$MANIFEST_FILE" >> "$HASH_FILE" 2>/dev/null || log_verbose "Failed to hash manifest file"
     fi
     
-    # Hash the collection log file itself
+    # Hash the collection log file
     if [ -f "$LOG_FILE" ]; then
-        shasum -a 256 "$LOG_FILE" >> "$HASH_FILE" 2>/dev/null || log "WARN" "Failed to hash log file: $LOG_FILE"
+        shasum -a 256 "$LOG_FILE" >> "$HASH_FILE" 2>/dev/null || log_verbose "Failed to hash log file"
+    fi
+    
+    # Hash the error log file
+    if [ -f "$ERROR_LOG_FILE" ]; then
+        shasum -a 256 "$ERROR_LOG_FILE" >> "$HASH_FILE" 2>/dev/null || log_verbose "Failed to hash error log file"
     fi
     
     log "INFO" "SHA256 hashes generated in $HASH_FILE"
