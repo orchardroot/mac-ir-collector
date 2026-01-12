@@ -20,6 +20,7 @@ OUTPUT_DIR="${1:-$HOME/Desktop/IR_Collection_${HOSTNAME}_${TIMESTAMP}}"
 LOG_FILE="$OUTPUT_DIR/collection.log"
 MANIFEST_FILE="$OUTPUT_DIR/manifest.txt"
 HASH_FILE="$OUTPUT_DIR/hashes.sha256"
+ERROR_LOG_FILE="$OUTPUT_DIR/error_collection.log"
 
 DRY_RUN=false
 VERBOSE=false
@@ -148,6 +149,11 @@ init_collection() {
     echo "# SHA256 Hashes for IR Collection" > "$HASH_FILE"
     echo "# Generated: $(date)" >> "$HASH_FILE"
     echo "" >> "$HASH_FILE"
+
+    # Initialise error log file
+    echo "# macOS IR Collection Error Log" > "$ERROR_LOG_FILE"
+    echo "# Generated: $(date)" >> "$ERROR_LOG_FILE"
+    echo "" >> "$ERROR_LOG_FILE"
     
     log "INFO" "Collection directory: $OUTPUT_DIR"
 }
@@ -170,7 +176,7 @@ collect_file() {
     mkdir -p "$OUTPUT_DIR/$dest_dir"
     
     if [ -f "$src" ]; then
-        cp -p "$src" "$OUTPUT_DIR/$dest_dir/" 2>/dev/null
+        cp -p "$src" "$OUTPUT_DIR/$dest_dir/" 2>> "$ERROR_LOG_FILE"
         if [ $? -eq 0 ]; then
             local filename
             filename=$(basename "$src")
@@ -178,11 +184,11 @@ collect_file() {
             log_verbose "Collected: $src"
             return 0
         else
-            log "WARN" "Failed to copy: $src (permission denied?)"
+            log "WARN" "Failed to copy file '$src' to '$OUTPUT_DIR/$dest_dir/'. Check '$ERROR_LOG_FILE' for details."
             return 1
         fi
     elif [ -d "$src" ]; then
-        cp -Rp "$src" "$OUTPUT_DIR/$dest_dir/" 2>/dev/null
+        cp -Rp "$src" "$OUTPUT_DIR/$dest_dir/" 2>> "$ERROR_LOG_FILE"
         if [ $? -eq 0 ]; then
             local dirname
             dirname=$(basename "$src")
@@ -190,7 +196,7 @@ collect_file() {
             log_verbose "Collected directory: $src"
             return 0
         else
-            log "WARN" "Failed to copy directory: $src"
+            log "WARN" "Failed to copy directory '$src' to '$OUTPUT_DIR/$dest_dir/'. Check '$ERROR_LOG_FILE' for details."
             return 1
         fi
     fi
@@ -209,7 +215,7 @@ collect_with_find() {
     
     local find_cmd="find \"$search_path\""
     [ -n "$max_depth" ] && find_cmd="$find_cmd -maxdepth $max_depth"
-    find_cmd="$find_cmd -name \"$pattern\" -type f 2>/dev/null"
+    find_cmd="$find_cmd -name \"$pattern\" -type f 2>> "$ERROR_LOG_FILE""
     
     local count=0
     while IFS= read -r file; do
@@ -245,7 +251,7 @@ collect_system_info() {
         sw_vers
         echo ""
         echo "=== HARDWARE ==="
-        system_profiler SPHardwareDataType 2>/dev/null
+        system_profiler SPHardwareDataType 2>> "$ERROR_LOG_FILE"
         echo ""
         echo "=== CURRENT USER ==="
         whoami
@@ -264,10 +270,10 @@ collect_system_info() {
         ps aux
         echo ""
         echo "=== NETWORK CONNECTIONS ==="
-        netstat -an 2>/dev/null || echo "netstat not available"
+        netstat -an 2>> "$ERROR_LOG_FILE" || log "WARN" "netstat command failed. Check $ERROR_LOG_FILE for details."
         echo ""
         echo "=== LISTENING PORTS ==="
-        lsof -i -P -n 2>/dev/null | head -100
+        lsof -i -P -n 2>> "$ERROR_LOG_FILE" | head -100
         echo ""
         echo "=== MOUNTED VOLUMES ==="
         mount
@@ -330,57 +336,57 @@ collect_unified_logs() {
     start_time=$(date -v-${UNIFIED_LOG_HOURS}H '+%Y-%m-%d %H:%M:%S')
     
     # Export unified logs to text format
-    log show --start "$start_time" --style syslog > "$OUTPUT_DIR/unified_logs/unified_log_syslog.txt" 2>/dev/null
+    log show --start "$start_time" --style syslog > "$OUTPUT_DIR/unified_logs/unified_log_syslog.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect unified syslog. Check $ERROR_LOG_FILE."
     
     # Export with JSON format for easier parsing
-    log show --start "$start_time" --style json > "$OUTPUT_DIR/unified_logs/unified_log.json" 2>/dev/null
+    log show --start "$start_time" --style json > "$OUTPUT_DIR/unified_logs/unified_log.json" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect unified JSON log. Check $ERROR_LOG_FILE."
     
     # Collect specific subsystems of interest
     log "INFO" "Collecting security-relevant unified log subsystems..."
     
     # Authentication events
     log show --start "$start_time" --predicate 'subsystem == "com.apple.opendirectoryd"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/opendirectoryd.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/opendirectoryd.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect opendirectoryd logs. Check $ERROR_LOG_FILE."
     
     # Authorization events
     log show --start "$start_time" --predicate 'subsystem == "com.apple.Authorization"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/authorization.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/authorization.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect authorization logs. Check $ERROR_LOG_FILE."
     
     # Endpoint Security events
     log show --start "$start_time" --predicate 'subsystem == "com.apple.endpointsecurity"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/endpoint_security.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/endpoint_security.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect endpoint security logs. Check $ERROR_LOG_FILE."
     
     # XProtect events
     log show --start "$start_time" --predicate 'subsystem == "com.apple.XProtect"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/xprotect.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/xprotect.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect XProtect logs. Check $ERROR_LOG_FILE."
     
     # Gatekeeper events
     log show --start "$start_time" --predicate 'subsystem == "com.apple.syspolicy"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/gatekeeper.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/gatekeeper.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect Gatekeeper logs. Check $ERROR_LOG_FILE."
     
     # SSH events
     log show --start "$start_time" --predicate 'process == "sshd"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/sshd.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/sshd.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect sshd logs. Check $ERROR_LOG_FILE."
     
     # Sudo events
     log show --start "$start_time" --predicate 'process == "sudo"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/sudo.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/sudo.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect sudo logs. Check $ERROR_LOG_FILE."
     
     # Login window events
     log show --start "$start_time" --predicate 'subsystem == "com.apple.loginwindow"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/loginwindow.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/loginwindow.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect loginwindow logs. Check $ERROR_LOG_FILE."
     
     # Kernel events
     log show --start "$start_time" --predicate 'sender == "kernel"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/kernel.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/kernel.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect kernel logs. Check $ERROR_LOG_FILE."
     
     # Santa (if installed)
     log show --start "$start_time" --predicate 'subsystem == "com.google.santa"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/santa.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/santa.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect Santa logs. Check $ERROR_LOG_FILE."
     
     # CrowdStrike (if installed)
     log show --start "$start_time" --predicate 'subsystem CONTAINS "crowdstrike"' --style syslog \
-        > "$OUTPUT_DIR/unified_logs/crowdstrike.txt" 2>/dev/null
+        > "$OUTPUT_DIR/unified_logs/crowdstrike.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect CrowdStrike logs. Check $ERROR_LOG_FILE."
     
     echo "unified_logs/ - Unified log export" >> "$MANIFEST_FILE"
     log "INFO" "Unified logs collected"
@@ -466,8 +472,8 @@ collect_persistence_mechanisms() {
     # Login/logout hooks
     if [ "$DRY_RUN" = false ]; then
         mkdir -p "$OUTPUT_DIR/persistence/hooks"
-        defaults read com.apple.loginwindow LoginHook > "$OUTPUT_DIR/persistence/hooks/login_hook.txt" 2>/dev/null
-        defaults read com.apple.loginwindow LogoutHook > "$OUTPUT_DIR/persistence/hooks/logout_hook.txt" 2>/dev/null
+        defaults read com.apple.loginwindow LoginHook > "$OUTPUT_DIR/persistence/hooks/login_hook.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect LoginHook. Check $ERROR_LOG_FILE."
+        defaults read com.apple.loginwindow LogoutHook > "$OUTPUT_DIR/persistence/hooks/logout_hook.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect LogoutHook. Check $ERROR_LOG_FILE."
     fi
     
     # Startup items (legacy)
@@ -482,7 +488,7 @@ collect_persistence_mechanisms() {
     # System extensions
     if [ "$DRY_RUN" = false ]; then
         mkdir -p "$OUTPUT_DIR/persistence/system_extensions"
-        systemextensionsctl list > "$OUTPUT_DIR/persistence/system_extensions/list.txt" 2>/dev/null
+        systemextensionsctl list > "$OUTPUT_DIR/persistence/system_extensions/list.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list system extensions. Check $ERROR_LOG_FILE."
     fi
     
     # Login items (user)
@@ -503,24 +509,30 @@ collect_network_info() {
     mkdir -p "$OUTPUT_DIR/network"
     
     # Network interfaces
-    ifconfig -a > "$OUTPUT_DIR/network/interfaces.txt" 2>/dev/null
+    ifconfig -a > "$OUTPUT_DIR/network/interfaces.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect network interfaces. Check $ERROR_LOG_FILE."
     
     # Routing table
-    netstat -rn > "$OUTPUT_DIR/network/routes.txt" 2>/dev/null
+    netstat -rn > "$OUTPUT_DIR/network/routes.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect routing table. Check $ERROR_LOG_FILE."
     
     # ARP cache
-    arp -a > "$OUTPUT_DIR/network/arp_cache.txt" 2>/dev/null
+    arp -a > "$OUTPUT_DIR/network/arp_cache.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect ARP cache. Check $ERROR_LOG_FILE."
     
     # DNS configuration
-    scutil --dns > "$OUTPUT_DIR/network/dns_config.txt" 2>/dev/null
-    cat /etc/resolv.conf > "$OUTPUT_DIR/network/resolv_conf.txt" 2>/dev/null
+    scutil --dns > "$OUTPUT_DIR/network/dns_config.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect DNS config via scutil. Check $ERROR_LOG_FILE."
+    cat /etc/resolv.conf > "$OUTPUT_DIR/network/resolv_conf.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect /etc/resolv.conf. Check $ERROR_LOG_FILE."
     
-    # Active connections
-    lsof -i -P -n > "$OUTPUT_DIR/network/connections.txt" 2>/dev/null
+    # Active connections (lsof) - provides process info and open files
+    lsof -i -P -n > "$OUTPUT_DIR/network/active_connections_lsof.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect active connections via lsof. Check $ERROR_LOG_FILE."
     
-    # Firewall status
-    /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate > "$OUTPUT_DIR/network/firewall_status.txt" 2>/dev/null
-    /usr/libexec/ApplicationFirewall/socketfilterfw --listapps >> "$OUTPUT_DIR/network/firewall_status.txt" 2>/dev/null
+    # Active connections (netstat with program/PID)
+    # The -b flag shows the associated executable (requires root).
+    netstat -f inet -a -b -p tcp > "$OUTPUT_DIR/network/active_connections_netstat_tcp.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect active TCP connections via netstat. Check $ERROR_LOG_FILE."
+    netstat -f inet -a -b -p udp > "$OUTPUT_DIR/network/active_connections_netstat_udp.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect active UDP connections via netstat. Check $ERROR_LOG_FILE."
+    
+    # Firewall status and rules
+    /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate > "$OUTPUT_DIR/network/firewall_status.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to get firewall global state. Check $ERROR_LOG_FILE."
+    /usr/libexec/ApplicationFirewall/socketfilterfw --listapps >> "$OUTPUT_DIR/network/firewall_status.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list firewall apps. Check $ERROR_LOG_FILE."
+    /usr/libexec/ApplicationFirewall/socketfilterfw --listall > "$OUTPUT_DIR/network/firewall_rules_detailed.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list detailed firewall rules. Check $ERROR_LOG_FILE."
     
     # Known networks
     local user_home
@@ -528,17 +540,89 @@ collect_network_info() {
     collect_file "$user_home/Library/Preferences/com.apple.wifi.known-networks.plist" \
         "network" "Known WiFi networks"
     
-    # Hosts file
-    collect_file "/etc/hosts" "network" "Hosts file"
-    
-    # SSH known hosts and config
-    collect_file "$user_home/.ssh/known_hosts" "network/ssh" "SSH known hosts"
-    collect_file "$user_home/.ssh/config" "network/ssh" "SSH config"
-    collect_file "/etc/ssh/sshd_config" "network/ssh" "SSHD config"
-    
     echo "network/ - Network configuration" >> "$MANIFEST_FILE"
     log "INFO" "Network information collected"
 }
+
+# Function to dump Chrome history from SQLite database
+dump_chrome_history() {
+    local user_home="$1"
+    local output_base_dir="$2"
+    local chrome_dir="$user_home/Library/Application Support/Google/Chrome/Default"
+    local history_db="$chrome_dir/History"
+    local output_dir="$output_base_dir/browser_artifacts/chrome_parsed"
+
+    if [ ! -f "$history_db" ]; then
+        log_verbose "Chrome History database not found at $history_db"
+        return 1
+    fi
+
+    log "INFO" "Dumping Chrome history from $history_db..."
+    mkdir -p "$output_dir"
+
+    # Dump URLs
+    sqlite3 "$history_db" "SELECT datetime(last_visit_time / 1000000 + strftime('%s', '1601-01-01'), 'unixepoch') AS 'Last Visit Time', url, title, visit_count FROM urls ORDER BY last_visit_time DESC;" > "$output_dir/chrome_urls.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Chrome URLs. Check $ERROR_LOG_FILE."
+
+    # Dump Downloads
+    sqlite3 "$history_db" "SELECT datetime(start_time / 1000000 + strftime('%s', '1601-01-01'), 'unixepoch') AS 'Start Time', current_path, target_path, tab_url, total_bytes FROM downloads ORDER BY start_time DESC;" > "$output_dir/chrome_downloads.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Chrome downloads. Check $ERROR_LOG_FILE."
+
+    # Dump Search Terms (from Keyword Search Terms table if available, or by parsing visits)
+    # This query might need adjustment based on Chrome version/schema
+    sqlite3 "$history_db" "SELECT term FROM keyword_search_terms ORDER BY id DESC;" > "$output_dir/chrome_search_terms.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Chrome search terms. Check $ERROR_LOG_FILE."
+
+    log "INFO" "Chrome history dumped to $output_dir"
+    echo "browser_artifacts/chrome_parsed/ - Parsed Chrome history" >> "$MANIFEST_FILE"
+}
+
+# Function to dump Firefox history from SQLite databases
+dump_firefox_history() {
+    local user_home="$1"
+    local output_base_dir="$2"
+    local firefox_profiles_dir="$user_home/Library/Application Support/Firefox/Profiles"
+    local output_parent_dir="$output_base_dir/browser_artifacts/firefox_parsed"
+
+    if [ ! -d "$firefox_profiles_dir" ]; then
+        log_verbose "Firefox Profiles directory not found at $firefox_profiles_dir"
+        return 1
+    fi
+
+    log "INFO" "Dumping Firefox history..."
+    mkdir -p "$output_parent_dir"
+
+    for profile_dir in "$firefox_profiles_dir"/*/; do
+        if [ -d "$profile_dir" ]; then
+            local profile_name=$(basename "$profile_dir")
+            local places_db="${profile_dir}places.sqlite"
+            local downloads_db="${profile_dir}downloads.sqlite" # Often combined into places.sqlite in newer versions
+
+            local output_dir="$output_parent_dir/$profile_name"
+            mkdir -p "$output_dir"
+
+            if [ -f "$places_db" ]; then
+                log "INFO" "Dumping Firefox history for profile '$profile_name' from $places_db..."
+                # Dump URLs and visit times
+                sqlite3 "$places_db" "SELECT datetime(moz_places.last_visit_date / 1000000, 'unixepoch') AS 'Last Visit Time', moz_places.url, moz_places.title, moz_places.visit_count FROM moz_places ORDER BY moz_places.last_visit_date DESC;" > "$output_dir/firefox_urls.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Firefox URLs for profile $profile_name. Check $ERROR_LOG_FILE."
+                
+                # Dump recent downloads (if still in places.sqlite)
+                sqlite3 "$places_db" "SELECT datetime(annos.date / 1000000, 'unixepoch') AS 'Download Date', a.content AS 'Download Path', p.url AS 'Source URL' FROM moz_annos AS annos JOIN moz_items_annos AS ia ON annos.id = ia.anno_id JOIN moz_places AS p ON ia.item_id = p.id JOIN moz_annotations AS a ON annos.anno_id = a.id WHERE a.item_id = ia.item_id AND a.anno_attribute_id = (SELECT id FROM moz_anno_attributes WHERE name = 'download/path') ORDER BY annos.date DESC;" > "$output_dir/firefox_downloads_from_places.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Firefox downloads from places.sqlite for profile $profile_name. Check $ERROR_LOG_FILE."
+
+            else
+                log_verbose "Firefox places.sqlite not found for profile $profile_name at $places_db"
+            fi
+
+            if [ -f "$downloads_db" ]; then
+                log "INFO" "Dumping Firefox downloads for profile '$profile_name' from $downloads_db..."
+                # Dump downloads from separate downloads.sqlite if it exists
+                sqlite3 "$downloads_db" "SELECT datetime(startTime / 1000, 'unixepoch') AS 'Start Time', target, source, state FROM moz_downloads ORDER BY startTime DESC;" > "$output_dir/firefox_downloads.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to dump Firefox downloads for profile $profile_name. Check $ERROR_LOG_FILE."
+            else
+                log_verbose "Firefox downloads.sqlite not found for profile $profile_name at $downloads_db"
+            fi
+            echo "browser_artifacts/firefox_parsed/$profile_name/ - Parsed Firefox history for profile $profile_name" >> "$MANIFEST_FILE"
+        fi
+    done
+    log "INFO" "Firefox history dumped to $output_parent_dir"
+}
+
 
 collect_browser_artifacts() {
     log "INFO" "Collecting browser artifacts..."
@@ -563,6 +647,7 @@ collect_browser_artifacts() {
         collect_file "$chrome_dir/Bookmarks" "browser_artifacts/chrome" "Chrome bookmarks"
         collect_file "$chrome_dir/Preferences" "browser_artifacts/chrome" "Chrome preferences"
         collect_file "$chrome_dir/Extensions" "browser_artifacts/chrome" "Chrome extensions"
+        dump_chrome_history "$user_home" "$OUTPUT_DIR"
     fi
     
     # Firefox
@@ -578,6 +663,7 @@ collect_browser_artifacts() {
                 collect_file "${profile_dir}extensions.json" "browser_artifacts/firefox/$profile_name" "Firefox extensions"
             fi
         done
+        dump_firefox_history "$user_home" "$OUTPUT_DIR"
     fi
     
     # Edge
@@ -665,13 +751,9 @@ collect_shell_history() {
     
     # Bash history
     collect_file "$user_home/.bash_history" "shell_history" "Bash history"
-    collect_file "$user_home/.bash_profile" "shell_history" "Bash profile"
-    collect_file "$user_home/.bashrc" "shell_history" "Bashrc"
     
     # Zsh history
     collect_file "$user_home/.zsh_history" "shell_history" "Zsh history"
-    collect_file "$user_home/.zshrc" "shell_history" "Zshrc"
-    collect_file "$user_home/.zprofile" "shell_history" "Zsh profile"
     
     # Fish history
     collect_file "$user_home/.local/share/fish/fish_history" "shell_history" "Fish history"
@@ -700,18 +782,18 @@ collect_application_artifacts() {
     # Installed applications list
     if [ "$DRY_RUN" = false ]; then
         mkdir -p "$OUTPUT_DIR/applications"
-        ls -la /Applications > "$OUTPUT_DIR/applications/applications_list.txt" 2>/dev/null
-        ls -la "$user_home/Applications" >> "$OUTPUT_DIR/applications/applications_list.txt" 2>/dev/null
+        ls -la /Applications > "$OUTPUT_DIR/applications/applications_list.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list /Applications. Check $ERROR_LOG_FILE."
+        ls -la "$user_home/Applications" >> "$OUTPUT_DIR/applications/applications_list.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list user Applications. Check $ERROR_LOG_FILE."
         
         # Homebrew packages (if installed)
         if command -v brew &> /dev/null; then
-            brew list > "$OUTPUT_DIR/applications/homebrew_packages.txt" 2>/dev/null
-            brew list --cask > "$OUTPUT_DIR/applications/homebrew_casks.txt" 2>/dev/null
+            brew list > "$OUTPUT_DIR/applications/homebrew_packages.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list Homebrew packages. Check $ERROR_LOG_FILE."
+            brew list --cask > "$OUTPUT_DIR/applications/homebrew_casks.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list Homebrew casks. Check $ERROR_LOG_FILE."
         fi
         
         # pip packages (if installed)
         if command -v pip3 &> /dev/null; then
-            pip3 list > "$OUTPUT_DIR/applications/pip_packages.txt" 2>/dev/null
+            pip3 list > "$OUTPUT_DIR/applications/pip_packages.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to list pip3 packages. Check $ERROR_LOG_FILE."
         fi
     fi
     
@@ -726,6 +808,51 @@ collect_application_artifacts() {
     log "INFO" "Application artifacts collected"
 }
 
+collect_config_files() {
+    log "INFO" "Collecting configuration files..."
+    
+    local user_home
+    user_home=$(eval echo ~"${SUDO_USER:-$USER}")
+    
+    # User-specific configuration files (moved from collect_shell_history and collect_network_info, and new ones)
+    collect_file "$user_home/.bash_profile" "config_files/user" "User Bash profile"
+    collect_file "$user_home/.bashrc" "config_files/user" "User Bashrc"
+    collect_file "$user_home/.zshrc" "config_files/user" "User Zshrc"
+    collect_file "$user_home/.zprofile" "config_files/user" "User Zsh profile"
+    collect_file "$user_home/.profile" "config_files/user" "User profile"
+    collect_file "$user_home/.cshrc" "config_files/user" "User Cshrc"
+    collect_file "$user_home/.tcshrc" "config_files/user" "User Tcshrc"
+    collect_file "$user_home/.login" "config_files/user" "User Login script"
+    collect_file "$user_home/.gitconfig" "config_files/user" "User Git configuration"
+    collect_file "$user_home/.vimrc" "config_files/user" "User Vim configuration"
+    collect_file "$user_home/.inputrc" "config_files/user" "User Inputrc"
+    
+    # User-specific directories (copy recursively)
+    collect_file "$user_home/.config" "config_files/user_dirs" "User .config directory"
+    collect_file "$user_home/.gnupg" "config_files/user_dirs" "User GnuPG directory"
+    collect_file "$user_home/.aws" "config_files/user_dirs" "User AWS configuration directory"
+    collect_file "$user_home/.kube" "config_files/user_dirs" "User Kubernetes configuration directory"
+    collect_file "$user_home/.ssh/known_hosts" "config_files/user_ssh" "User SSH known hosts"
+    collect_file "$user_home/.ssh/config" "config_files/user_ssh" "User SSH config"
+    
+    # System-wide configuration files (moved from collect_network_info and new ones)
+    collect_file "/etc/hosts" "config_files/system" "System Hosts file"
+    collect_file "/etc/profile" "config_files/system" "System profile"
+    collect_file "/etc/shells" "config_files/system" "System shells"
+    collect_file "/etc/bashrc" "config_files/system" "System Bashrc"
+    collect_file "/etc/zshrc" "config_files/system" "System Zshrc"
+    collect_file "/etc/paths" "config_files/system" "System paths"
+    collect_file "/etc/sudoers" "config_files/system" "System Sudoers"
+    collect_file "/etc/sysctl.conf" "config_files/system" "System sysctl configuration"
+    collect_file "/etc/ssh/sshd_config" "config_files/system_ssh" "System SSHD config"
+    
+    # System-wide directories (copy recursively)
+    collect_file "/etc/pam.d" "config_files/system_dirs" "System PAM directory"
+    collect_file "/etc/security" "config_files/system_dirs" "System security directory"
+
+    log "INFO" "Configuration files collected"
+}
+
 generate_hashes() {
     if [ "$DRY_RUN" = true ]; then
         log "INFO" "DRY RUN: Would generate SHA256 hashes"
@@ -734,12 +861,33 @@ generate_hashes() {
     
     log "INFO" "Generating SHA256 hashes for collected files..."
     
-    find "$OUTPUT_DIR" -type f ! -name "hashes.sha256" ! -name "collection.log" -print0 | \
-        while IFS= read -r -d '' file; do
-            shasum -a 256 "$file" >> "$HASH_FILE" 2>/dev/null
-        done
+    # Ensure the hash file itself is excluded from hashing
+    local hash_file_basename
+    hash_file_basename=$(basename "$HASH_FILE")
+    local log_file_basename
+    log_file_basename=$(basename "$LOG_FILE")
+    local manifest_file_basename
+    manifest_file_basename=$(basename "$MANIFEST_FILE")
+
+    find "$OUTPUT_DIR" -type f \
+        ! -name "$hash_file_basename" \
+        ! -name "$log_file_basename" \
+        ! -name "$manifest_file_basename" \
+        -print0 | while IFS= read -r -d '' file; do
+        shasum -a 256 "$file" >> "$HASH_FILE" 2>/dev/null || log "WARN" "Failed to hash file: $file"
+    done
     
-    log "INFO" "Hashes generated"
+    # Hash the manifest file itself after all other files are processed and listed
+    if [ -f "$MANIFEST_FILE" ]; then
+        shasum -a 256 "$MANIFEST_FILE" >> "$HASH_FILE" 2>/dev/null || log "WARN" "Failed to hash manifest file: $MANIFEST_FILE"
+    fi
+    
+    # Hash the collection log file itself
+    if [ -f "$LOG_FILE" ]; then
+        shasum -a 256 "$LOG_FILE" >> "$HASH_FILE" 2>/dev/null || log "WARN" "Failed to hash log file: $LOG_FILE"
+    fi
+    
+    log "INFO" "SHA256 hashes generated in $HASH_FILE"
 }
 
 compress_collection() {
@@ -755,16 +903,16 @@ compress_collection() {
     parent_dir=$(dirname "$OUTPUT_DIR")
     dir_name=$(basename "$OUTPUT_DIR")
     
-    tar -czf "${OUTPUT_DIR}.tar.gz" -C "$parent_dir" "$dir_name" 2>/dev/null
+    tar -czf "${OUTPUT_DIR}.tar.gz" -C "$parent_dir" "$dir_name" 2>> "$ERROR_LOG_FILE"
     
     if [ $? -eq 0 ]; then
         log "INFO" "Collection compressed to: ${OUTPUT_DIR}.tar.gz"
         
         # Generate hash of archive
-        shasum -a 256 "${OUTPUT_DIR}.tar.gz" > "${OUTPUT_DIR}.tar.gz.sha256"
+        shasum -a 256 "${OUTPUT_DIR}.tar.gz" > "${OUTPUT_DIR}.tar.gz.sha256" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to hash archive. Check $ERROR_LOG_FILE."
         log "INFO" "Archive hash: ${OUTPUT_DIR}.tar.gz.sha256"
     else
-        log "WARN" "Failed to compress collection"
+        log "WARN" "Failed to compress collection. Check $ERROR_LOG_FILE."
     fi
 }
 
@@ -832,6 +980,7 @@ main() {
     collect_security_databases
     collect_shell_history
     collect_application_artifacts
+    collect_config_files
     
     # Finalise
     generate_hashes

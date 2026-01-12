@@ -8,13 +8,15 @@ A comprehensive incident response log collection script for macOS. Collects fore
 - **Unified Logs:** Exports Apple unified logs with targeted collection of security-relevant subsystems (authentication, sudo, SSH, kernel, XProtect, Gatekeeper, Endpoint Security).
 - **Audit Logs:** BSM audit logs and configuration from `/var/audit`.
 - **Persistence Mechanisms:** LaunchDaemons, LaunchAgents, cron jobs, periodic scripts, login hooks, kernel extensions, system extensions, and authorization plugins.
-- **Network Information:** Interface configuration, routing tables, ARP cache, DNS config, active connections, firewall rules, known WiFi networks, and SSH configuration.
-- **Browser Artifacts:** History, cookies, downloads, bookmarks, and extensions for Safari, Chrome, Firefox, and Edge.
+- **Network Information:** Detailed network interface configuration, routing tables, ARP cache, DNS config, **active connections with process information (lsof, netstat -b -p)**, and **comprehensive firewall rules (socketfilterfw --listall)**.
+- **Browser Artifacts:** Raw history, cookies, downloads, bookmarks, and extensions for Safari, Chrome, Firefox, and Edge. **Includes parsed URLs, downloads, and search terms from Chrome and Firefox SQLite databases.**
 - **User Activity:** KnowledgeC database, recent items, Finder/Dock preferences, and Notification Center data.
 - **Security Databases:** TCC (privacy permissions), quarantine events, XProtect rules, and Gatekeeper configuration.
 - **Shell History:** bash, zsh, fish, python, mysql, and sqlite history files.
+- **Configuration Files:** Collects various system and user configuration files, including shell profiles (.bashrc, .zshrc), SSH configs (.ssh/config, known_hosts), system-wide configurations (/etc/hosts, /etc/sudoers), and other common dotfiles and directories (.gitconfig, .vimrc, .aws, .kube).
 - **Diagnostic Reports:** Crash reports and spin reports.
-- **Integrity Verification:** SHA256 hashes generated for all collected files.
+- **Integrity Verification:** SHA256 hashes generated for all collected files and the final archive.
+- **Robust Error Logging:** Commands redirect errors to a dedicated `error_collection.log` file for better traceability.
 - **Dry Run Mode:** Preview what would be collected without copying files.
 - **Auto-Compression:** Creates a `.tar.gz` archive with separate hash file.
 
@@ -60,6 +62,7 @@ A comprehensive incident response log collection script for macOS. Collects fore
 ```
 IR_Collection_<hostname>_<timestamp>/
 ├── collection.log          # Collection activity log
+├── error_collection.log    # Log of commands that encountered errors
 ├── manifest.txt            # List of all collected files
 ├── hashes.sha256           # SHA256 hashes for integrity
 ├── system_info.txt         # Basic system information
@@ -70,11 +73,12 @@ IR_Collection_<hostname>_<timestamp>/
 ├── diagnostic_reports/     # Crash reports
 ├── persistence/            # LaunchAgents, LaunchDaemons, etc.
 ├── network/                # Network configuration and logs
-├── browser_artifacts/      # Browser history databases
+├── browser_artifacts/      # Browser history databases and parsed output
 ├── user_activity/          # KnowledgeC, recent items, etc.
 ├── security_databases/     # TCC, quarantine events
 ├── shell_history/          # Bash/zsh history files
-└── applications/           # Installed applications list
+├── applications/           # Installed applications list
+└── config_files/           # Various system and user configuration files
 ```
 
 ## Important Notes
@@ -82,7 +86,7 @@ IR_Collection_<hostname>_<timestamp>/
 - Run with `sudo` for complete collection. Some artifacts require root privileges.
 - Unified log export can take several minutes depending on the time range.
 - Use `--no-unified` for faster collection when unified logs are not required.
-- The script will warn but continue if it cannot access certain files due to permissions.
+- The script will warn but continue if it cannot access certain files or execute commands due to permissions or other issues. Details of such failures will be logged in `error_collection.log`.
 - Browser artifacts are copied as-is; browsers do not need to be closed.
 - Output is automatically compressed to `.tar.gz` with a separate SHA256 hash file for the archive.
 
