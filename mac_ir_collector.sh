@@ -524,10 +524,8 @@ collect_network_info() {
     # Active connections (lsof) - provides process info and open files
     lsof -i -P -n > "$OUTPUT_DIR/network/active_connections_lsof.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect active connections via lsof. Check $ERROR_LOG_FILE."
     
-    # Active connections (netstat with program/PID)
-    # The -b flag shows the associated executable (requires root).
-    netstat -f inet -a -b -p tcp > "$OUTPUT_DIR/network/active_connections_netstat_tcp.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect active TCP connections via netstat. Check $ERROR_LOG_FILE."
-    netstat -f inet -a -b -p udp > "$OUTPUT_DIR/network/active_connections_netstat_udp.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect active UDP connections via netstat. Check $ERROR_LOG_FILE."
+    # Active connections (netstat for comprehensive list, without process info which is covered by lsof)
+    netstat -f inet -an > "$OUTPUT_DIR/network/active_connections_netstat_tcp_udp.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to collect active TCP/UDP connections via netstat. Check $ERROR_LOG_FILE."
     
     # Firewall status and rules
     /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate > "$OUTPUT_DIR/network/firewall_status.txt" 2>> "$ERROR_LOG_FILE" || log "WARN" "Failed to get firewall global state. Check $ERROR_LOG_FILE."

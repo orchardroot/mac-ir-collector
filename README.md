@@ -8,7 +8,7 @@ A comprehensive incident response log collection script for macOS. Collects fore
 - **Unified Logs:** Exports Apple unified logs with targeted collection of security-relevant subsystems (authentication, sudo, SSH, kernel, XProtect, Gatekeeper, Endpoint Security).
 - **Audit Logs:** BSM audit logs and configuration from `/var/audit`.
 - **Persistence Mechanisms:** LaunchDaemons, LaunchAgents, cron jobs, periodic scripts, login hooks, kernel extensions, system extensions, and authorization plugins.
-- **Network Information:** Detailed network interface configuration, routing tables, ARP cache, DNS config, **active connections with process information (lsof, netstat -b -p)**, and **comprehensive firewall rules (socketfilterfw --listall)**.
+- **Network Information:** Detailed network interface configuration, routing tables, ARP cache, DNS config, **active connections (lsof provides process information, netstat provides a comprehensive list)**, and **comprehensive firewall rules (socketfilterfw --listall)**.
 - **Browser Artifacts:** Raw history, cookies, downloads, bookmarks, and extensions for Safari, Chrome, Firefox, and Edge. **Includes parsed URLs, downloads, and search terms from Chrome and Firefox SQLite databases.**
 - **User Activity:** KnowledgeC database, recent items, Finder/Dock preferences, and Notification Center data.
 - **Security Databases:** TCC (privacy permissions), quarantine events, XProtect rules, and Gatekeeper configuration.
